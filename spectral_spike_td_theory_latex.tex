@@ -1,0 +1,362 @@
+% Standalone LaTeX theory block for Spectral-Spike regularization.
+% This version deliberately avoids the TD-operator recursion and proves
+% Bellman-loss decrease directly under a frozen target.
+
+\section{Theory: Direct Bellman-Loss Improvement from a Spectral Spike}
+\label{sec:direct-spike-theory}
+
+For a minibatch $\{(h_i,y_i)\}_{i=1}^N$, let
+\begin{equation}
+    \mathcal B(W)
+    :=\frac{1}{2N}\sum_{i=1}^N\delta_i(W)^2,
+    \qquad
+    \delta_i(W):=Q_W(h_i)-y_i,
+    \label{eq:fixed-target-bellman-loss}
+\end{equation}
+where the target $y_i$ is stop-gradient during the analyzed critic update.  For
+clarity, consider a two-layer critic
+\begin{equation}
+    Q_W(h)=\sum_{k=1}^m o_k\varphi(w_k^\top h),
+    \qquad W=[w_1,\ldots,w_m]^\top,
+    \label{eq:critic}
+\end{equation}
+with fixed output weights $o_k$ during the directional argument.  Let
+$(s_1,\hat u,\hat v)$ be a top singular triplet of $W$ and define
+\begin{equation}
+    D:=\hat u\hat v^\top,
+    \qquad \|D\|_F=1.
+    \label{eq:spike-direction}
+\end{equation}
+
+\paragraph{Assumptions.}
+We use four standard local assumptions.
+\begin{enumerate}
+    \item[(A1)] \textbf{Frozen target.}  The values $y_i$ in
+    \eqref{eq:fixed-target-bellman-loss} do not depend on $W$ during the
+    analyzed update.
+    \item[(A2)] \textbf{Directional smoothness.}  There is $L_B<\infty$ such
+    that, for all sufficiently small $\alpha$,
+    \begin{equation}
+        \mathcal B(W+\alpha D)
+        \le \mathcal B(W)
+        +\alpha\langle\nabla_W\mathcal B(W),D\rangle
+        +\frac{L_B}{2}\alpha^2.
+        \label{eq:directional-smoothness}
+    \end{equation}
+    \item[(A3)] \textbf{Supercritical spectral alignment.}  The top right
+    singular vector obeys the signal-plus-noise decomposition
+    \begin{equation}
+        \hat v=\tau v^\star+\sqrt{1-\tau^2}\,v_\perp,
+        \qquad \tau\ge\tau_0>0,
+        \label{eq:bbp-alignment}
+    \end{equation}
+    with $v_\perp\perp v^\star$ and unit vectors $v^\star,v_\perp$.  This is
+    the usual consequence of operating above the BBP transition.
+    \item[(A4)] \textbf{Useful signal and centered orthogonal fluctuation.}
+    With $g_i$ and $\xi_i$ defined in Lemma~\ref{lem:spike-feature},
+    \begin{equation}
+        -\frac1N\sum_{i=1}^N\delta_i g_i\ge c_g>0.
+        \label{eq:useful-signal}
+    \end{equation}
+    Conditional on the current critic, residuals, and signal components,
+    $X_i:=\delta_i\xi_i$ are independent, centered, and
+    $\sigma^2$-sub-Gaussian.  Conditional independence may be replaced by any
+    martingale or mixing assumption yielding the same concentration bound.
+\end{enumerate}
+
+\begin{lemma}[Spike-induced tangent feature]
+\label{lem:spike-feature}
+Let
+\begin{equation}
+    \psi_i:=\left.\frac{\mathrm d}{\mathrm d\alpha}
+    Q_{W+\alpha D}(h_i)\right|_{\alpha=0}.
+\end{equation}
+Write $h_i=T_i v^\star+h_i^\perp$, where
+$(v^\star)^\top h_i^\perp=0$.  Then
+\begin{equation}
+    \psi_i=S_i(W)\hat v^\top h_i,
+    \qquad
+    S_i(W):=\sum_{k=1}^m o_k\hat u_k\varphi'(w_k^\top h_i),
+    \label{eq:exact-tangent-feature}
+\end{equation}
+and, under \eqref{eq:bbp-alignment},
+\begin{equation}
+    \psi_i=\tau g_i+\sqrt{1-\tau^2}\,\xi_i,
+    \label{eq:signal-noise-feature}
+\end{equation}
+where
+\begin{equation}
+    g_i:=S_i(W)T_i,
+    \qquad
+    \xi_i:=S_i(W)v_\perp^\top h_i^\perp.
+\end{equation}
+\end{lemma}
+
+\begin{theorem}[Direct Bellman-loss decrease above the BBP threshold]
+\label{thm:direct-bellman-decrease}
+Suppose (A1)--(A4) hold.  For any $\delta\in(0,1)$, define
+\begin{equation}
+    \varepsilon_N(\delta)
+    :=\sigma\sqrt{\frac{2\log(2/\delta)}{N}},
+    \qquad
+    \mu_N(\delta)
+    :=\tau_0c_g-\sqrt{1-\tau_0^2}\,\varepsilon_N(\delta).
+    \label{eq:descent-margin}
+\end{equation}
+If $\mu_N(\delta)>0$, then, with probability at least $1-\delta$,
+every step size
+\begin{equation}
+    0<\alpha\le\frac{\mu_N(\delta)}{L_B}
+    \label{eq:valid-step}
+\end{equation}
+satisfies
+\begin{equation}
+    \boxed{
+    \mathcal B(W+\alpha\hat u\hat v^\top)
+    \le
+    \mathcal B(W)-\frac{\alpha\mu_N(\delta)}{2}.}
+    \label{eq:main-decrease}
+\end{equation}
+Thus a supercritical spectral spike supplies a certified descent direction for
+the fixed-target Bellman loss whenever its task-aligned signal dominates the
+centered orthogonal fluctuation.
+\end{theorem}
+
+\begin{corollary}[Constant-order supercritical gain]
+\label{cor:constant-gain}
+Under the assumptions of Theorem~\ref{thm:direct-bellman-decrease}, if
+$N\ge 8\sigma^2(1-\tau_0^2)\log(2/\delta)/(\tau_0^2c_g^2)$, then
+\begin{equation}
+    \mu_N(\delta)\ge\frac{\tau_0c_g}{2}.
+\end{equation}
+Consequently, for
+$0<\alpha\le\tau_0c_g/(2L_B)$,
+\begin{equation}
+    \mathcal B(W+\alpha D)
+    \le \mathcal B(W)-\frac{\alpha\tau_0c_g}{4}
+\end{equation}
+with probability at least $1-\delta$.  The guaranteed decrease is therefore
+constant order above the BBP threshold rather than vanishing with dimension.
+\end{corollary}
+
+\begin{proposition}[The hinge spike loss moves in the analyzed direction]
+\label{prop:hinge-direction}
+Let
+\begin{equation}
+    \mathcal L_{\rm spike}(W):=(T-s_1(W))_+^2,
+\end{equation}
+where $s_1(W)$ is simple and $s_1(W)<T$.  Then
+\begin{equation}
+    \nabla_W\mathcal L_{\rm spike}(W)
+    =-2(T-s_1(W))\hat u\hat v^\top.
+\end{equation}
+Hence an isolated gradient step on this regularizer is
+\begin{equation}
+    W^+=W+2\eta_{\rm sp}(T-s_1(W))\hat u\hat v^\top.
+    \label{eq:regularizer-step}
+\end{equation}
+If the effective step
+$\alpha=2\eta_{\rm sp}(T-s_1(W))$ satisfies
+\eqref{eq:valid-step}, Theorem~\ref{thm:direct-bellman-decrease} applies to the
+regularizer-induced component without changing the SST algorithm.
+\end{proposition}
+
+\begin{corollary}[Finite-width robustness]
+\label{cor:finite-width}
+Suppose the realized directional feature is
+$\psi^{(m)}=\psi+r_m$ and
+\begin{equation}
+    \left|\frac1N\sum_{i=1}^N\delta_i r_{m,i}\right|
+    \le\frac{\mu_N(\delta)}{2}.
+    \label{eq:finite-width-condition}
+\end{equation}
+Then, with the same probability as in
+Theorem~\ref{thm:direct-bellman-decrease},
+\begin{equation}
+    \mathcal B(W+\alpha D)
+    \le \mathcal B(W)-\frac{\alpha\mu_N(\delta)}{4}
+\end{equation}
+for every $0<\alpha\le\mu_N(\delta)/(2L_B)$.
+\end{corollary}
+
+\appendix
+\section{Proofs for the Direct Bellman-Loss Theory}
+\label{app:direct-proofs}
+
+\subsection{Proof of Lemma~\ref{lem:spike-feature}}
+
+The $k$th row of $W+\alpha D$ is
+$w_k+\alpha\hat u_k\hat v$.  Therefore
+\begin{align}
+    Q_{W+\alpha D}(h_i)
+    &=\sum_{k=1}^m o_k
+      \varphi\!\left((w_k+\alpha\hat u_k\hat v)^\top h_i\right),\\
+    \left.\frac{\mathrm d}{\mathrm d\alpha}
+      Q_{W+\alpha D}(h_i)\right|_{\alpha=0}
+    &=\sum_{k=1}^m o_k\hat u_k
+      \varphi'(w_k^\top h_i)\hat v^\top h_i\\
+    &=S_i(W)\hat v^\top h_i.
+\end{align}
+This proves \eqref{eq:exact-tangent-feature}.  Next substitute
+$\hat v=\tau v^\star+\sqrt{1-\tau^2}v_\perp$ and
+$h_i=T_i v^\star+h_i^\perp$.  Orthogonality gives
+\begin{equation}
+    \hat v^\top h_i
+    =\tau T_i+\sqrt{1-\tau^2}\,v_\perp^\top h_i^\perp.
+\end{equation}
+Multiplying by $S_i(W)$ yields
+\begin{equation}
+    \psi_i
+    =\tau S_i(W)T_i
+     +\sqrt{1-\tau^2}S_i(W)v_\perp^\top h_i^\perp
+    =\tau g_i+\sqrt{1-\tau^2}\,\xi_i,
+\end{equation}
+which proves \eqref{eq:signal-noise-feature}.
+
+\subsection{Concentration of the orthogonal fluctuation}
+
+\begin{lemma}[Conditional concentration]
+\label{lem:conditional-concentration}
+Under (A4), with probability at least $1-\delta$,
+\begin{equation}
+    \left|\frac1N\sum_{i=1}^N\delta_i\xi_i\right|
+    \le\varepsilon_N(\delta).
+    \label{eq:concentration-event}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Condition on the current critic, residuals, and signal components.  By (A4),
+$X_i=\delta_i\xi_i$ are independent, centered, and
+$\sigma^2$-sub-Gaussian.  Hence
+\begin{equation}
+    \Pr\!\left(
+      \left|\frac1N\sum_{i=1}^N X_i\right|\ge t
+      \ \middle|\ W,\{\delta_i,g_i\}_{i=1}^N
+    \right)
+    \le 2\exp\!\left(-\frac{Nt^2}{2\sigma^2}\right).
+\end{equation}
+Setting $t=\sigma\sqrt{2\log(2/\delta)/N}$ makes the right-hand side
+equal to $\delta$.  Removing the conditioning proves
+\eqref{eq:concentration-event}.
+\end{proof}
+
+\subsection{The spike direction has negative Bellman directional derivative}
+
+\begin{lemma}[Descent certificate]
+\label{lem:descent-certificate}
+Under the event \eqref{eq:concentration-event},
+\begin{equation}
+    \langle\nabla_W\mathcal B(W),D\rangle
+    \le-\mu_N(\delta).
+    \label{eq:gradient-certificate}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+By (A1), the targets are constant with respect to $W$.  The chain rule and
+Lemma~\ref{lem:spike-feature} give
+\begin{align}
+    \langle\nabla_W\mathcal B(W),D\rangle
+    &=\left.\frac{\mathrm d}{\mathrm d\alpha}
+       \mathcal B(W+\alpha D)\right|_{\alpha=0}\\
+    &=\frac1N\sum_{i=1}^N\delta_i\psi_i\\
+    &=\tau\frac1N\sum_{i=1}^N\delta_i g_i
+      +\sqrt{1-\tau^2}\frac1N\sum_{i=1}^N\delta_i\xi_i.
+\end{align}
+By \eqref{eq:useful-signal}, the first term is at most $-\tau c_g$.
+On the concentration event, the second term is at most
+$\sqrt{1-\tau^2}\varepsilon_N(\delta)$.  Therefore
+\begin{equation}
+    \langle\nabla_W\mathcal B(W),D\rangle
+    \le-\tau c_g+\sqrt{1-\tau^2}\varepsilon_N(\delta).
+\end{equation}
+For $\tau\ge\tau_0$, the function
+$f(\tau)=\tau c_g-\sqrt{1-\tau^2}\varepsilon_N(\delta)$ is increasing on
+$[0,1]$.  Consequently
+\begin{equation}
+    \tau c_g-\sqrt{1-\tau^2}\varepsilon_N(\delta)
+    \ge\tau_0c_g-\sqrt{1-\tau_0^2}\varepsilon_N(\delta)
+    =\mu_N(\delta),
+\end{equation}
+which proves \eqref{eq:gradient-certificate}.
+\end{proof}
+
+\subsection{Proof of Theorem~\ref{thm:direct-bellman-decrease}}
+
+By Lemma~\ref{lem:conditional-concentration}, the event used in
+Lemma~\ref{lem:descent-certificate} holds with probability at least
+$1-\delta$.  On this event, (A2) and \eqref{eq:gradient-certificate} imply
+\begin{equation}
+    \mathcal B(W+\alpha D)
+    \le\mathcal B(W)-\alpha\mu_N(\delta)+\frac{L_B}{2}\alpha^2.
+\end{equation}
+If $0<\alpha\le\mu_N(\delta)/L_B$, then
+$(L_B/2)\alpha^2\le\alpha\mu_N(\delta)/2$.  Thus
+\begin{equation}
+    \mathcal B(W+\alpha D)
+    \le\mathcal B(W)-\frac{\alpha\mu_N(\delta)}{2},
+\end{equation}
+as claimed.
+
+\subsection{Proof of Corollary~\ref{cor:constant-gain}}
+
+The sample-size condition is equivalent to
+\begin{equation}
+    \sqrt{1-\tau_0^2}\,\sigma
+    \sqrt{\frac{2\log(2/\delta)}{N}}
+    \le\frac{\tau_0c_g}{2}.
+\end{equation}
+Substitution into \eqref{eq:descent-margin} yields
+$\mu_N(\delta)\ge\tau_0c_g/2$.  The permitted step size and loss decrease
+then follow directly from Theorem~\ref{thm:direct-bellman-decrease}.
+
+\subsection{Proof of Proposition~\ref{prop:hinge-direction}}
+
+When $s_1(W)$ is simple, the standard singular-value differential is
+\begin{equation}
+    \nabla_Ws_1(W)=\hat u\hat v^\top.
+\end{equation}
+For $s_1(W)<T$, differentiation of
+$(T-s_1(W))^2$ gives
+\begin{equation}
+    \nabla_W\mathcal L_{\rm spike}(W)
+    =-2(T-s_1(W))\nabla_Ws_1(W)
+    =-2(T-s_1(W))\hat u\hat v^\top.
+\end{equation}
+Subtracting $\eta_{\rm sp}$ times this gradient yields
+\eqref{eq:regularizer-step}.  The last statement follows by identifying its
+coefficient with $\alpha$ in Theorem~\ref{thm:direct-bellman-decrease}.
+
+\subsection{Proof of Corollary~\ref{cor:finite-width}}
+
+The realized directional derivative is
+\begin{align}
+    \frac1N\sum_{i=1}^N\delta_i\psi_i^{(m)}
+    &=\frac1N\sum_{i=1}^N\delta_i\psi_i
+      +\frac1N\sum_{i=1}^N\delta_i r_{m,i}\\
+    &\le-\mu_N(\delta)+\frac{\mu_N(\delta)}{2}
+     =-\frac{\mu_N(\delta)}{2}.
+\end{align}
+Directional smoothness therefore gives
+\begin{equation}
+    \mathcal B(W+\alpha D)
+    \le\mathcal B(W)-\frac{\alpha\mu_N(\delta)}{2}
+      +\frac{L_B}{2}\alpha^2.
+\end{equation}
+For $0<\alpha\le\mu_N(\delta)/(2L_B)$, the quadratic term is at most
+$\alpha\mu_N(\delta)/4$, proving
+\begin{equation}
+    \mathcal B(W+\alpha D)
+    \le\mathcal B(W)-\frac{\alpha\mu_N(\delta)}{4}.
+\end{equation}
+
+\subsection{Scope of the result}
+
+The loss in \eqref{eq:fixed-target-bellman-loss} is the empirical squared
+Bellman/TD loss for a frozen target, not a global policy-evaluation theorem.
+The result neither invokes the TD recursion nor claims that the moving-target
+loss decreases monotonically across all training iterations.  Its precise claim
+is local and directly verifiable: above the BBP threshold, the top singular
+direction is a Bellman-loss descent direction with a non-vanishing margin when
+the aligned signal is useful and the orthogonal component is centered.
