@@ -1,0 +1,1996 @@
+
+\begin{abstract}
+Value-function approximation can be a major source of instability in deep reinforcement learning, as critic errors are repeatedly propagated through bootstrapped targets and policy updates. We study critic learning through the spectral dynamics of its weight matrices. While randomly initialized weights typically exhibit a Marchenko–Pastur-like spectral bulk, training can produce isolated singular values that reflect emerging low-rank structure. Motivated by this observation, we propose Spike Spectral Acceleration Regularization (SSAR), a critic regularizer that encourages the leading singular value to separate from the empirical bulk while limiting unnecessary growth of the remaining spectrum. The method is motivated by the Baik–Ben Arous–Péché transition, which connects spectral separation with non-vanishing alignment to an underlying signal direction. For a fixed-target critic update, we show that once the leading spike becomes supercritical, its spectral direction contributes a non-vanishing task-aligned descent component to the Bellman objective under explicit alignment and local regularity conditions. SSAR further uses a data-dependent stopping rule to remove the additional spike pressure after sufficient spectral separation. Experiments on continuous-control benchmarks show faster learning, lower variability across runs, and comparable or improved final returns relative to standard regularization baselines.
+
+\end{abstract}
+
+
+
+
+
+
+\section{Introduction}
+\label{sec:intro}
+
+
+Value networks are fundamental to deep reinforcement learning because they supply the scalar estimates of future return that guide policy improvement and carry reward information back to earlier decisions. In practice these value functions are almost always implemented with deep neural networks, which are powerful but imperfect: with limited interactions and limited computing budget they produce biased and noisy estimates. The training regime in reinforcement learning makes this especially challenging. Targets for the value network are computed from the agent's current behavior and its own estimators, and value updates are interleaved with policy updates rather than performed in isolation. In many settings each data point can only be used for a small number of gradient steps before new data arrives or the policy changes, so the value network rarely has the chance to fully converge between updates. As a result, small errors in the value estimate tend to reappear in subsequent targets and can grow over time through the coupled update process\cite{tang2024improving}. The practical consequences are straightforward: inaccurate value estimates can steer the policy toward worse actions, slow the backward propagation of reward information to early states, and reduce sample efficiency.
+
+Prior work attacks this problem from several directions. TD($\lambda$) reduces reliance on one-step bootstrapped targets by forming multi-step returns, which helps propagate reward information more reliably \cite{sutton1998reinforcement}. Double Q-learning and other ensemble methods address overestimation and variance in the target values \cite{van2016deep,hasselt2010double,lee2021sunrise}. Using a delayed copy of the network as a target network also stabilizes learning by smoothing the bootstrapping targets \cite{mnih2013playing}. These techniques are widely adopted and effective in practice, but don't actually focus on the neural value approximator itself, which involve the dynamic of  deep neural networks.
+
+
+Recent work show that random matrix theory provides a clear and intuitive way to understand how neural networks organize information during training. At the start, the singular values of a network’s weight matrices typically follow the Marchenko–Pastur (MP) law, which is exactly what we expect from a purely random initialization. As training proceeds, however, the spectrum gradually drifts away from this random baseline. A small set of singular values begin to grow noticeably larger than the rest, indicating that the network is starting to identify directions that are aligned with the task. In other words, the weight matrix begins to split into two distinct parts: a wide, noisy bulk of small singular values and a much smaller set of strong, high-energy directions that carry task-relevant information. This evolution generally unfolds in stages: an early period that still appears mostly random, a middle phase where signal gradually pulls away from noise, and a later stage in which the spectrum often develops a heavy-tailed shape as more structured, correlated patterns are learned. The middle phase, where signal separates from noise, is almost unavoidable and represents a crucial turning point. It is the point that the network starts to encode meaningful information about the problem it is solving. The speed of this separation plays a crucial role in learning, since a faster split allows the network to use meaningful signal earlier, leading to quicker learning and more reliable convergence, while a slower split delays progress and makes learning less efficient. 
+
+Due to the limited training budget for value networks in reinforcement learning, signal and noise can remain entangled for a considerable portion of training, which in turn allows sizable estimation errors to propagate into subsequent policy updates. Motivated by this insight and inspired by results from random matrix theory such as the Baik–Ben Arous–Péché (BBP) phase transition \cite{baik2005phase}, we propose a regularization method that explicitly accelerates the separation between signal-related and noise-related singular values. By encouraging this separation to occur earlier in training, the value network can capture task-relevant structure sooner and provide more reliable targets to the policy, leading to faster, more stable learning.
+
+
+Concretely, we introduce Spike Spectral Acceleration Regularization (SSAR). SSAR monitors the singular value spectrum during the middle stages of training and adds a lightweight loss term that encourages candidate spike singular values to move away from the Marchenko–Pastur (MP) bulk. In practice, this causes the BBP phase transition to occur earlier than it would under standard training, so the network can pick up task-relevant signal sooner. Our main contributions are as follows. (1) We propose SSAR, a simple and principled regularizer guided by random matrix theory that speeds up signal–noise separation in value networks. (2) We provide theoretical analysis showing that SSAR lowers value-estimation error under reasonable assumptions, and we derive a practical stopping rule based on deviations from the MP distribution. (3) We empirically validate SSAR on challenging continuous-control benchmarks and show consistent gains in sample efficiency, stability, and final performance compared to common baselines. (4) We release our code to support reproducibility and fair comparisons.
+
+\section{Related work}
+\label{sec:related}
+Spectral analysis of matrices that arise in neural networks has recently attracted a lot of interest as a way to understand what these models learn and to suggest practical improvements for training \cite{papyan2018full,sagun2016eigenvalues,ge2021large,pennington2017nonlinear}. The Marchenko–Pastur (MP) law, first described in \cite{marvcenko1967distribution}, captures the singular-value distribution one expects from a random initialization of a layer. Building on that baseline, Martin and Mahoney \cite{martin2021implicit} and follow-up works have traced how the empirical spectrum changes during training and identified a recurring “5+1” phase transition: the spectrum starts MP-like, a few singular values peel away to form a bulk-plus-spikes structure, and with further training the spectrum often develops heavy-tailed behavior as correlated structure grows. Other papers have used these spectral signatures in different ways — for example, using heavy-tailedness to predict generalization  \cite{martin2021predicting}, probing the role of small singular values in large language models \cite{staats2024small}, or pruning by treating singulars below the MP edge as noise \cite{berlyand2023enhancing,berlyand2025pruning}. Most prior work focuses on late-stage spectra or post hoc analysis of trained models; the early-stage spectral changes, when signal first peels away from noise, have received far less attention even though they directly affect how quickly a network can learn. To our knowledge, this paper is the first to study that early-stage evolution specifically for value-network training and to propose a practical method for speeding up the signal–noise separation during training.
+\section{Preliminaries and notation}
+\label{sec:prelim}
+\subsection{Reinforcement Learning}
+We consider a Markov decision process (MDP) given by the tuple $(\mathcal{S},\mathcal{A},P,R,\mu,\gamma)$, where $\mathcal{S}$ and $\mathcal{A}$ are the state and action spaces, $P(s'\mid s,a)$ is the transition kernel, $R(s,a)\in\mathbb{R}$ is the reward function, $\mu$ is the initial state distribution, and $\gamma\in(0,1)$ is the discount factor. The goal is to learn a stochastic policy $\pi^\phi(a\mid s)$, parameterized by $\phi$, that maximizes the expected discounted return
+\begin{equation}
+J(\pi^\phi)=\mathbb{E}\Big[\sum_{t=0}^{\infty}\gamma^t R(s_t,a_t)\Big],
+\end{equation}
+where actions are sampled $a_t\sim\pi^\phi(\cdot\mid s_t)$ and transitions follow $s_{t+1}\sim P(\cdot\mid s_t,a_t)$.
+
+For a fixed policy $\pi^\phi$, the state–action value function (Q-function) $Q^\theta:\mathcal{S}\times\mathcal{A}\to\mathbb{R}$, parameterized by $\theta$, is defined as
+\begin{equation}
+Q^{\theta}(s,a)=\mathbb{E}\Big[\sum_{t=0}^{\infty}\gamma^t R(s_t,a_t)\,\Big|\, (s_0,a_0)=(s,a)\Big].
+\end{equation}
+We focus on critic learning. Let $Q^\theta(s,a)$ denote the critic and let $y$ denote the target used in the current critic update. As in fitted-Q and target-network methods, $y$ is treated as fixed when differentiating
+the critic objective. We define the Bellman residual
+\begin{equation}
+r(s,a)
+=
+Q^\theta(s,a)-y,
+\end{equation}
+and the corresponding loss
+\begin{equation}
+L_0(Q^\theta)
+=
+\frac{1}{2}
+\E\left[
+r(s,a)^2
+\right].
+\label{eq:bellman_loss}
+\end{equation}
+A standard gradient-based update is
+\begin{equation}\label{eq:theta-update-mse}
+\theta'=\theta-\eta\,\nabla_\theta L_0(Q^\theta)
+=\theta-\eta\,\mathbb{E}_{(s,a,s')\sim\mathcal{D}}\big[r(s,a)\,\nabla_\theta Q^\theta(s,a)\big],
+\end{equation}
+where $\eta>0$ denotes the step size.
+
+To connect our spectral analysis to network parameters, consider a typical parametrization of the critic  \begin{equation}
+Q^\theta(h)
+=
+o^\top \varphi(Wh),
+\label{eq:critic_local}
+\end{equation} where $W\in\mathbb{R}^{n\times m}$ denotes the penultimate-layer weight matrix, $h\in\mathbb{R}^m$ is its input feature,
+$o\in\mathbb{R}^n$ is the output weight, and $\varphi(\cdot)$ the penultimate-layer activation.
+
+Let $\{s_k,u_k,v_k\}_{k\geq 1}$ denote the singular triplets of $W$,
+ordered as $s_1\geq s_2\geq\cdots$. Then$
+Wv_k=s_ku_k,
+\qquad
+W^\top u_k=s_kv_k.$
+We use $\lambda_k
+=
+\frac{s_k^2}{m}$ to denote the normalized squared singular values, i.e., the eigenvalues
+of $\frac{1}{m}WW^\top$.
+
+
+\subsection{Random Matrix Theory}
+We recall two standard results from random matrix theory that we use in the paper.
+
+Throughout the paper, we use standard asymptotic notation. For deterministic
+sequences, $a_m=O(b_m)$ means that $|a_m|/|b_m|$ remains bounded as
+$m\rightarrow\infty$, while $a_m=\Theta(b_m)$ means that the two sequences
+have the same asymptotic order. For random quantities, $X_m=O_p(a_m)$ means
+that $X_m/a_m$ is bounded in probability, and
+$X_m=\Theta_p(a_m)$ means that $|X_m|/a_m$ is bounded both above and away
+from zero in probability. We write $X_m\xrightarrow{p}X$ for convergence
+in probability.
+
+\begin{theorem}[Marchenko--Pastur law \cite{marvcenko1967distribution}]
+\label{thm:rmt1}
+Let $X$ be an $n\times m$ random matrix with i.i.d.\ entries having zero mean and variance $\sigma^2<\infty$. Define the sample covariance $Y=\tfrac{1}{m}XX^\top$ and let $\rho_Y(\lambda)$ be the empirical spectral distribution (ESD) of $Y$. If $n,m\to\infty$ with $n/m\to c\in(0,\infty)$, then almost surely the ESD $\rho_Y$ converges weakly to the Marchenko--Pastur distribution
+\[
+\rho^c_Y(\lambda)=\frac{1}{2\pi c\sigma^2}\,\frac{\sqrt{(\lambda_+-\lambda)(\lambda-\lambda_-)}}{\lambda}\,\mathbf{1}_{[\lambda_-,\lambda_+]},
+\]
+where $\lambda_{\pm}=\sigma^2(1\pm\sqrt{c})^2$ are the edges of the support.
+
+\end{theorem}
+
+\begin{theorem}[BBP phase transition {\cite{baik2005phase}}]
+\label{thm:rmt2}
+Let $X\in\mathbb{C}^{n\times m}$ have i.i.d.\ complex Gaussian columns with population covariance matrix $\Sigma=\operatorname{diag}(\ell_1,\dots,\ell_n)$, and form $Y \;=\; \frac{1}{m}\, X X^T$. Fix an integer $r> 0$ and suppose that $\ell_{r+1}=\cdots=\ell_N=1$, while $\ell_1,\dots,\ell_r$ are the  top population eigenvalues of covariance matrix. Assume $n,m\to\infty$ with $n/m\to c\in[1,\infty)$ . If for some $0\le k\le r,\ell_1=\cdots=\ell_k = 1+c^{\frac{1}{2}}$, and the remaining spikes $\ell_{k+1},\dots,\ell_r$ lie in $(0,1+c^{\frac{1}{2}})$, then the largest sample eigenvalue $\lambda_1$ satisfies $\mathbb{P}\!\Bigg( 
+\frac{\big(\lambda_1-(1+c^{\frac{1}{2}})^2\big) }{c^{-\frac{1}{2}}(1+c^{-\frac{1}{2}})^{4/3}}\, m^{2/3} \le x \Bigg)
+\rightarrow F_k(x)$,
+as $n,m\to\infty$. If for some $1\le k\le r$ the top population spikes satisfy $\ell_1=\cdots=\ell_k \in (1+c^{\frac{1}{2}},\infty)$, then $\lambda_1$ satisfies  $\mathbb{P}\!\Bigg( 
+\frac{\big(\lambda_1-(l_1+\frac{l_1c}{l_1-1})\big)\cdot\sqrt{m}}{\sqrt{l_1^2-\frac{l_1^2c}{(l_1-1)^2}}} \le x \Bigg)
+\rightarrow G_k(x)$, where  $F_k$ is a Tracy–Widom-type Fredholm-determinant distribution, and  $G_k$ is a finite-dimensional  Gaussian-type limit), precisely defined in \cite{baik2005phase}. This theorem is also extended form the largest eigenvalue of $Y$ to several eigenvalues \cite{benaych2011eigenvalues}.
+\end{theorem}
+
+The Marchenko--Pastur law characterizes the limiting spectral distribution
+of a high-dimensional random matrix and identifies the deterministic bulk
+edges $\lambda_-$ and $\lambda_+$. The BBP result describes how this spectral
+picture changes in the presence of a low-rank population signal. Before the
+signal exceeds the critical strength, the leading sample eigenvalue remains
+at the upper bulk edge and fluctuates on the $m^{-2/3}$ scale. Once the signal
+becomes supercritical, the leading eigenvalue separates from the bulk and
+fluctuates around an outlier location on the $m^{-1/2}$ scale. Together,
+these results provide the random spectral baseline and the signal-induced
+transition used in our method.
+
+
+
+
+\section{Method}
+\label{sec:method}
+
+We propose a lightweight spectral-acceleration module that can be added to
+standard value-network training to encourage earlier separation of
+task-relevant singular modes from the random spectral bulk. We first summarize
+the spectral regimes around the BBP transition, and then introduce the
+regularizer, stopping rule, and training procedure.
+
+Consider the normalized weight matrix $\widetilde W
+=
+\frac{1}{\sqrt m}W
+=
+Z+\theta u^\star {v^\star}^{\top},
+\label{eq:spiked_weight_main}$ where $Z$ is the random background,
+$\theta$ is the normalized rank-one signal strength, and
+$u^\star,v^\star$ are unit population signal directions.
+Since $W$ and $\widetilde W$ have identical singular vectors, $\lambda_1
+=
+\frac{s_1(W)^2}{m}
+=
+s_1(\widetilde W)^2.$
+
+
+Let $\theta_c$ denote the corresponding BBP threshold and define $\tau_m
+=
+\left|
+\ip{v_1}{v^\star}
+\right|$
+
+
+as the alignment between the empirical leading right singular vector and
+the population signal direction.
+
+\begin{corollary}[Spectral regimes around the BBP transition]
+\label{cor:three_regimes}
+For the spiked model $\widetilde W$, the leading spectral
+mode has the following asymptotic behavior.
+
+\textbf{Subcritical regime.}
+If $\theta\leq\theta_c-\varepsilon$ for some fixed $\varepsilon>0$, then
+
+\begin{equation}
+\lambda_1
+=
+\lambda_+
++
+O_p(m^{-2/3}),
+\qquad
+\tau_m
+=
+O_p(m^{-1/2}).
+\end{equation}
+
+\textbf{BBP transition regime.}
+If $|\theta-\theta_c|
+=
+O(m^{-1/3})$, then
+
+\begin{equation}
+\lambda_1
+=
+\lambda_+
++
+O_p(m^{-2/3}),
+\end{equation}
+
+while the characteristic singular-vector overlap scale is
+
+\begin{equation}
+\tau_m
+=
+O_p(m^{-1/6}).
+\end{equation}
+
+\textbf{Supercritical regime.}
+If $\theta\geq\theta_c+\varepsilon$, then
+
+\begin{equation}
+\lambda_1
+=
+f(\theta)
++
+O_p(m^{-1/2}),
+\qquad
+f(\theta)>\lambda_+,
+\end{equation}
+
+and
+
+\begin{equation}
+\tau_m
+\xrightarrow{p}
+\tau_\infty(\theta)>0.
+\end{equation}
+\end{corollary}
+
+A detailed derivation of Corollary~\ref{cor:three_regimes} is given in
+Appendix~\ref{app:corollary_proof}.
+
+\paragraph{Motivation}
+We view the target-layer weight matrix during training as $W=W_{\mathrm{init}}+\Delta W$, where $W_{\mathrm{init}}$ behaves like a random matrix and $\Delta W$ encodes the learned, low-rank task signal $\sum_{i=1}^r \theta_i u_i v_i^\top$. 
+
+At initialization, the empirical spectrum of
+$\tfrac{1}{m}W_{\mathrm{init}}W_{\mathrm{init}}^\top$ is described by the
+Marchenko--Pastur law (Theorem~\ref{thm:rmt1}). According to
+Corollary~\ref{cor:three_regimes}, before the BBP transition the largest
+sample eigenvalue remains near the upper bulk edge $\lambda_+$, with
+$O(m^{-2/3})$ fluctuations. Once a signal direction becomes supercritical,
+the corresponding sample eigenvalue separates from the bulk and concentrates
+around an outlier location $f(\theta_i)>\lambda_+$, with
+$O(m^{-1/2})$ fluctuations. This spectral separation marks the formation of
+a spike. Our key idea is to accelerate this process by selectively increasing
+near-edge modes, so that task-related spectral structure can emerge earlier
+during critic training.
+\paragraph{Spike regularizer}
+Guided by the above, we design a simple per-update regularizer that targets near-edge singular modes. Let $\lambda_+$ denote the right edge of the MP bulk for the background ensemble of $W$. Fix a constant $c>0$ and define the edge-window width $T \;=\; c\, m^{-2/3},$ and the spectral edge window $I=[\lambda_+,\lambda_+ + T]$. We call an empirical singular value $s_k$ a \emph{near-edge} mode if $s_k^2/m \in I$, which means squared singular value normalized by $m$ (eigenvalue of $\frac{1}{m}WW^T$) lies inside the edge window. For each such mode we add a per-mode penalty $\big(\lambda_++T - s_k^2/m\big)_+,$ where $(x)_+=\max\{x,0\}$. The multi-mode spike regularizer is $L_{\mathrm{SSAR}}(W) \;=\; \sum_{k:\, s_k^2/m\in I} \big(\lambda_++T - s_k^2/m\big)_+.$
+
+Given the standard Bellman residual loss $L_0$, the total training loss becomes $L_{\mathrm{tot}} \;=\; L_0 \;+\; \gamma\, L_{\mathrm{SSAR}},$ where $\gamma>0$ is a small regularization weight. For a simple singular value, $\nabla_Ws_k
+=
+u_kv_k^\top$ and hence
+
+\begin{equation}
+\nabla_W
+\left(
+\frac{s_k^2}{m}
+\right)
+=
+\frac{2s_k}{m}
+u_kv_k^\top.
+\end{equation}
+
+Therefore, when the $k$-th penalty is active, minimizing
+$L_{\mathrm{SSAR}}$ adds a positive update along $u_kv_k^\top$ and increases
+the corresponding singular value.
+
+
+
+\paragraph{Stopping rule}
+The spiked-matrix approximation is most appropriate during the early and
+intermediate stages of training. At later stages, weight spectra may develop
+stronger correlations and heavy-tailed structure
+\cite{martin2021implicit}.
+
+We therefore define the soft-rank statistic $R_s(W)
+=
+\frac{\lambda_+}{\lambda_{\max}},
+\qquad
+\lambda_{\max}
+=
+\frac{s_{\max}^2}{m}$. SSAR is applied while $R_s(W)>R_c$, where $R_c\in(0,1)$ is a stopping threshold.
+When $R_s(W)\leq R_c$, the leading mode has become sufficiently separated and the additional spectral acceleration is removed.
+
+\paragraph{Algorithm}
+The SSAR module is applied on top of standard actor–critic or fitted-Q updates. Algorithm~\ref{alg:ssar_main} summarizes the high-level training loop and Algorithm~\ref{alg:ssar_loss} gives the SSAR loss computation that runs every $e_{\mathrm{spike}}$ episodes (or training iterations).
+
+
+In practice, SSAR is inserted into the normal training loop as follows. Every $e_{\mathrm{spike}}$ iterations we extract the target-layer weight matrix $W$, compute its leading singular value $s_{\max}$ (and a set of top singulars $s_i$), and set $\lambda_{\max}=s_{\max}^2/m$ and $\lambda_+=\sigma^2(1+\sqrt{n/m})^2$. We then form the soft-rank $R_s=\lambda_+/\lambda_{\max}$ and compare it to a chosen threshold $R_c$. If $R_s>R_c$ (indicating the spectrum is still in the early/middle stage), we define the edge window $I=[\lambda_+,\lambda_++cm^{-2/3}]$ with $T=cm^{-2/3}$, compute the SSAR loss $L_{SSAR}$ and add $\gamma L_{\mathrm{SSAR}}$ to the usual Bellman loss $L_0(Q_\theta)$. The value-network parameters are then updated by gradient descent on the combined loss, and the policy is updated as usual. If $R_s\le R_c$, the SSAR term is skipped for that iteration. This procedure repeats until convergence. The next section presents theoretical guarantees and empirical results.
+
+
+
+
+
+\begin{figure}[ht]  % 这里的[ht]控制整体位置，允许LaTeX调整
+  \begin{minipage}[t]{0.43\textwidth}
+    % 内部算法用[H]强制不浮动，才能放在minipage里
+    \begin{algorithm}[H]
+    \caption{SSAR (high-level)}
+    \label{alg:ssar_main}
+    \begin{algorithmic}[1]
+    \State \textbf{Input:} policy params $\phi$, value params $\theta$, hyperparams, $e_{\mathrm{spike}}$, $\gamma$
+    \State Initialize $\phi,\theta$ (zero-mean, variance $\sigma^2$), set episode $e\leftarrow 0$
+    \Repeat
+      \State $e\leftarrow e+1$
+      \State Compute $L_{SSAR}\leftarrow\textsc{Compute-SSAR-Loss}(\theta,e)$
+      \State $\theta \leftarrow \theta - \eta\,\nabla_\theta\big(L_0(Q^\theta)+\gamma L_{SSAR}\big)$
+      \State Update $\phi$ using the policy objective of the base RL algorithm
+    \Until{convergence}
+    \end{algorithmic}
+    \end{algorithm}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.55\textwidth}
+    \begin{algorithm}[H]
+    \caption{Compute-SSAR-Loss}
+    \label{alg:ssar_loss}
+    \begin{algorithmic}[1]
+    \State \textbf{Input:} $\theta,\sigma,c,R_c,e,e_{\mathrm{spike}}$
+    \State $L_{SSAR}\leftarrow 0$
+    \If{$e \bmod e_{\mathrm{spike}} \neq 0$} \State \Return $L_{SSAR}$ \EndIf
+    \State Extract target-layer weight $W$ from $\theta$
+    \State Compute top singular values $s_1,\dots,s_r$ (and $s_{\max}$)
+    \State $\lambda_+\leftarrow \sigma^2(1+\sqrt{n/m})^2$,\quad $\lambda_{\max}\leftarrow s_{\max}^2/m$
+    \If{$\lambda_+/\lambda_{\max} < R_c$} \State \Return $0$ \Comment{stop SSAR (spikes already separated)}
+    \EndIf
+    \State $T\leftarrow c\, m^{-2/3}$,\quad $I\leftarrow [\lambda_+,\lambda_+ + T]$
+    \For{each $s_i$ in $s_1,\dots,s_r$}
+      \If{$s_i^2/m \in I$}
+        \State $L_{SSAR}\leftarrow L_{SSAR} + \big(\lambda_+ +T - s_i^2/m\big)_+$
+      \EndIf
+    \EndFor
+    \State \Return $L_{SSAR}$
+    \end{algorithmic}
+    \end{algorithm}
+  \end{minipage}
+\end{figure}
+
+\section{Performance Analysis}
+\label{sec:analysis}
+
+We now study whether the spectral acceleration introduced by SSAR reduces the
+critic Bellman loss. The analysis focuses on one active leading singular mode
+and isolates the additional parameter update generated by the SSAR
+regularizer. Formal assumptions and complete proofs are given in
+Appendix~\ref{app:bellman_theory}.
+
+Let $(s,u,v)$ denote the leading singular triplet of the selected critic
+weight matrix $W$. When this mode lies in the active edge window,
+its contribution to loss is $L_{\mathrm{spike}}(W)
+=
+\left(
+\lambda_+ + T-\frac{s^2}{m}
+\right)_+$. Inside the active region, using
+$\nabla_W s=uv^\top$, we have $\nabla_W L_{\mathrm{spike}}(W)
+=
+-\frac{2s}{m}uv^\top.$
+
+
+A gradient step on the total critic objective
+$L_{\mathrm{tot}}=L_0+\gamma L_{\mathrm{spike}}$ is therefore
+
+\begin{align}
+W_{\mathrm{new}}
+&=
+W-\eta\nabla_WL_0
+-\eta\gamma\nabla_WL_{\mathrm{spike}}
+\nonumber\\
+&=
+W-\eta\nabla_WL_0
++
+\frac{2\eta\gamma s}{m}uv^\top.
+\label{eq:combined_update}
+\end{align}
+
+Thus the additional update produced by SSAR is
+
+\begin{equation}
+\Delta W_{\mathrm{SSAR}}
+=
+\alpha_m uv^\top,
+\qquad
+\alpha_m
+=
+\frac{2\eta\gamma s}{m}>0.
+\label{eq:ssar_step}
+\end{equation}
+
+For an active near-edge mode, $s^2/m=\Theta(1)$. Thus, when $\eta$ and
+$\gamma$ are independent of the matrix width,
+$\alpha_m=\Theta(m^{-1/2})$.
+
+We analyze the change in the fixed-target Bellman loss caused by this
+additional spectral component,
+
+\begin{equation}
+\Delta L_{\mathrm{SSAR}}
+=
+L_0(W+\Delta W_{\mathrm{SSAR}})
+-
+L_0(W).
+\label{eq:ssar_loss_change}
+\end{equation}
+
+Corollary~\ref{cor:three_regimes} shows that modes close to the upper spectral
+edge can correspond to different stages of the BBP transition. In the
+far-subcritical regime, the task alignment is only
+$O_p(m^{-1/2})$; in the non-degenerate transition regime it increases to
+$\Theta_p(m^{-1/6})$; and for a fixed supercritical spike it becomes
+order one. The following theorem shows that these different alignment scales
+lead to qualitatively different effects on the Bellman loss.
+
+\begin{theorem}
+\label{thm:main_bellman}
+Under mild regularity conditions on the critic, the input features, and the
+task-relevant signal, formally stated in
+Appendix~\ref{app:bellman_theory}, we write the Bellman-loss change as $\Delta L_{\mathrm{SSAR}}
+=
+-\mathcal{D}_m+\mathcal{E}_m$, where $\mathcal{D}_m\ge 0$ denotes the task-aligned descent contribution and
+$\mathcal{E}_m$ collects the task-orthogonal and higher-order terms. The SSAR spectral update has the following
+behavior.
+
+\textbf{Subcritical regime.}
+If the leading signal remains a fixed distance below the BBP threshold, then $\tau_m=O_p(m^{-1/2})$. The task-aligned contribution is therefore of the same order as the task-orthogonal fluctuation. \begin{equation}
+\mathcal{D}_m=O_p(m^{-1}),
+\qquad
+\mathcal{E}_m=O_p(m^{-1}),
+\end{equation}
+Since the latter is not sign constrained,
+the resulting Bellman-loss change has no deterministic sign under the
+stated assumptions.
+
+
+\textbf{BBP transition regime.}
+Under a non-degenerate critical scaling for which $\tau_m=\Theta_p(m^{-1/6})$, the task-aligned contribution dominates the task-orthogonal fluctuation and
+\begin{equation}
+\mathcal{D}_m=\Theta_p(m^{-2/3}),
+\qquad
+\mathcal{E}_m=O_p(m^{-1})=o_p(\mathcal{D}_m),
+\end{equation}
+\begin{equation}
+\Delta L_{\mathrm{SSAR}}<
+0
+\end{equation}
+
+with probability tending to one.
+
+\textbf{Supercritical regime.}
+For a fixed supercritical signal, $\tau_m
+\xrightarrow{p}
+\tau_\infty>0,$
+
+
+and
+\begin{equation}
+\mathcal{D}_m=\Theta_p(m^{-1/2}),
+\qquad
+\mathcal{E}_m=O_p(m^{-1})=o_p(\mathcal{D}_m),
+\end{equation}
+\begin{equation}
+\Delta L_{\mathrm{SSAR}}
+<
+0
+\end{equation}
+
+with probability tending to one.
+\end{theorem}
+
+Theorem~\ref{thm:main_bellman} explains why SSAR operates on a spectral
+window rather than requiring an explicit classifier for the BBP stage.
+Both a far-subcritical mode and a mode inside the BBP transition can satisfy $\lambda_1
+=
+\lambda_+
++
+O_p(m^{-2/3})$,
+and therefore both can lie inside $I=[\lambda_+,\lambda_++T],
+\qquad
+T=cm^{-2/3}.$
+
+The largest eigenvalue alone cannot reliably distinguish these two cases.
+However, their effects on critic optimization are different. For a genuinely
+subcritical mode, the empirical task alignment remains on the same
+$m^{-1/2}$ scale as the orthogonal fluctuation, and the resulting SSAR
+perturbation has only an $O_p(m^{-1})$ Bellman effect with no fixed sign.
+Once the mode reaches the BBP transition, its alignment increases to the
+$m^{-1/6}$ scale. The resulting $m^{-2/3}$ descent term then dominates the
+$O_p(m^{-1})$ second-order contribution, making the same spectral update
+reliably loss decreasing.
+
+Hence SSAR does not require precise identification of the latent BBP stage
+from the observed eigenvalue. It can act on unresolved near-edge modes:
+its effect is asymptotically negligible when the mode is still genuinely
+subcritical, but becomes beneficial once task-relevant alignment emerges
+through the BBP transition. After a sufficiently separated outlier has
+formed, the stopping rule removes the additional spectral pressure.
+
+
+\section{Experiments }
+\label{sec:experiments}
+
+In this section, we validate our proposed SSAR algorithm using some high-dimensional continuous control tasks from the DeepMind control suite (Tassa et al., 2018).  We compare SSAR with baseline algorithm (without spike accelerated) and with L1 or L2 regularization. What's more, we make some ablation experiment: the influence of  the size of acceleration window, the comparation of acceleration of xx and multiple layers, the influence of different "stop point" in stop rule.
+
+
+
+\begin{itemize}
+  \item Synthetic spiked-model simulation to verify the predicted $\Omega(\gamma n^{-1/3})$ scaling in the near-critical regime.
+  \item Controlled RL environments (e.g. small gridworld / control tasks) with instrumented penultimate-layer SVD to show accelerated formation of task-relevant directions and improved sample efficiency.
+  \item Ablations: varying $\gamma$, step-size schedules, and number of accelerated modes.
+\end{itemize}
+Detailed empirical protocols, datasets, and plots will be added in the experimental section.
+
+% ---------------------------
+% 8. Discussion and limitations
+% ---------------------------
+\section{Discussion and limitations}
+\label{sec:discussion}
+
+We emphasize the assumptions and limitations: the main theorem requires existence of a near-critical signal (BBP regime), and the present analysis is at population level (finite-sample/algorithmic noise and practical approximations are left for future work). We also discuss possible extensions: multi-signal generalizations, adaptive choices of $\gamma$, and combining with regularization to avoid pathological behavior in practice.
+
+% ---------------------------
+% 9. Conclusion
+% ---------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+Summary and directions for future work.
+
+% ---------------------------
+% References (placeholder)
+% ---------------------------
+\medskip
+
+
+% ---------------------------
+% Appendix (technical lemmas and proofs)
+% ---------------------------
+
+% ---------------------------
+% 4. The Algorithm (informal)
+% ---------------------------
+
+\subsubsection*{Author Contributions}
+If you'd like to, you may include  a section for author contributions as is done
+in many journals. This is optional and at the discretion of the authors.
+
+\subsubsection*{Acknowledgments}
+Use unnumbered third level headings for the acknowledgments. All
+acknowledgments, including those to funding agencies, go at the end of the paper.
+
+
+\bibliography{iclr2027_conference}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+
+
+\section{Proof of the Spectral-Regime Corollary}
+\label{app:corollary_proof}
+
+We provide the derivation of Corollary~\ref{cor:three_regimes}.
+The eigenvalue fluctuation scales follow from the BBP transition
+\cite{baik2005phase} and its rectangular finite-rank extensions
+\cite{benaych2012singular,ding2020high}, while the singular-vector
+behavior follows from the corresponding results for low-rank rectangular
+perturbations \cite{benaych2012singular,ding2020high}.
+
+
+% ------------------------------------------------------------
+\subsection{From Distributional Limits to $O_p$ Rates}
+% ------------------------------------------------------------
+
+We first recall a standard consequence of convergence in distribution.
+
+\begin{lemma}[Distributional convergence implies $O_p$]
+\label{lem:dist_to_op}
+Let $X_m$ be random variables, and let $a_m>0$ and
+$b_m\in\mathbb{R}$ be deterministic sequences. If
+
+\begin{equation}
+a_m(X_m-b_m)
+\xrightarrow{d}
+Y,
+\end{equation}
+
+where $Y$ is a non-degenerate random variable, then
+
+\begin{equation}
+X_m-b_m
+=
+O_p(a_m^{-1}).
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Fix $\varepsilon>0$. Since $Y$ is a proper random variable, there exists
+$K>0$ such that
+
+\begin{equation}
+\mathbb{P}(|Y|>K)
+<
+\frac{\varepsilon}{2}.
+\end{equation}
+
+By convergence in distribution, for all sufficiently large $m$,
+
+\begin{equation}
+\mathbb{P}
+\left(
+|a_m(X_m-b_m)|>K
+\right)
+<
+\varepsilon.
+\end{equation}
+
+Equivalently,
+
+\begin{equation}
+\mathbb{P}
+\left(
+|X_m-b_m|>\frac{K}{a_m}
+\right)
+<
+\varepsilon.
+\end{equation}
+
+Hence
+
+\begin{equation}
+X_m-b_m
+=
+O_p(a_m^{-1}),
+\end{equation}
+
+which completes the proof.
+\end{proof}
+
+
+% ------------------------------------------------------------
+\subsection{Largest-Eigenvalue Fluctuation}
+% ------------------------------------------------------------
+
+At the BBP transition, Theorem~\ref{thm:rmt2} gives a non-degenerate
+limiting distribution under the $m^{2/3}$ edge scaling
+\cite{baik2005phase}. In particular,
+
+\begin{equation}
+A_1
+\left(
+\lambda_1-\lambda_+
+\right)
+\xrightarrow{d}
+F_k,
+\end{equation}
+
+where
+
+\begin{equation}
+A_1=\Theta(m^{2/3}).
+\end{equation}
+
+Applying Lemma~\ref{lem:dist_to_op} gives
+
+\begin{equation}
+\lambda_1-\lambda_+
+=
+O_p(m^{-2/3}),
+\end{equation}
+
+and therefore
+
+\begin{equation}
+\lambda_1
+=
+\lambda_+
++
+O_p(m^{-2/3}).
+\label{eq:edge_fluctuation_app}
+\end{equation}
+
+For the rectangular additive deformation considered in our method,
+the same edge scale is obtained for non-outlier modes. In particular,
+Eq.~(1.14) and Theorem~3.4 of \cite{ding2020high} show that a mode
+below the outlier transition remains at the upper spectral edge on the
+$m^{-2/3}$ scale, up to the arbitrarily small polynomial slack in the
+general high-probability statement.
+
+For a fixed supercritical signal, Theorem~\ref{thm:rmt2} gives the
+$m^{-1/2}$ fluctuation scale in the classical spiked covariance model
+\cite{baik2005phase}. For rectangular finite-rank perturbations,
+Theorem~2.8 of \cite{benaych2012singular} establishes the emergence
+of a separated singular-value outlier. The corresponding local rate is
+given by Eq.~(1.13) and Theorem~3.4 of \cite{ding2020high}:
+
+\begin{equation}
+\lambda_1
+=
+f(\theta)
++
+O_p(m^{-1/2}),
+\qquad
+f(\theta)>\lambda_+,
+\label{eq:outlier_fluctuation_app}
+\end{equation}
+
+when the signal remains a fixed positive distance above the critical
+threshold. Thus, the $m^{-2/3}$ and $m^{-1/2}$ scales used in
+Corollary~\ref{cor:three_regimes} are respectively the edge and
+fixed-supercritical fluctuation scales of the rectangular spiked model
+\cite{benaych2012singular,ding2020high}.
+
+
+% ------------------------------------------------------------
+\subsection{Singular-Vector Alignment}
+% ------------------------------------------------------------
+
+Recall
+
+\begin{equation}
+\tau_m
+=
+\left|
+\left\langle v_1,v^\star\right\rangle
+\right|,
+\end{equation}
+
+where $v_1$ is the leading empirical right singular vector and $v^\star$
+is the population signal direction.
+
+
+\paragraph{Subcritical regime.}
+
+Suppose
+
+\begin{equation}
+\theta
+\leq
+\theta_c-\varepsilon
+\end{equation}
+
+for some fixed $\varepsilon>0$.
+Below the BBP threshold, the empirical singular vector does not acquire a
+non-vanishing projection onto the population signal direction; this
+singular-vector phase transition is characterized in
+Theorem~2.10 of \cite{benaych2012singular}.
+
+More quantitatively, Eq.~(1.18) and the non-outlier part of
+Theorem~3.5 in \cite{ding2020high} give the squared-overlap scale
+
+\begin{equation}
+\tau_m^2
+=
+O_p(m^{-1})
+\end{equation}
+
+for a signal below the transition scale. Taking square roots yields
+
+\begin{equation}
+\tau_m
+=
+O_p(m^{-1/2}).
+\label{eq:tau_sub_app}
+\end{equation}
+
+
+\paragraph{BBP transition regime.}
+
+The characteristic BBP transition window for the rectangular model is
+
+\begin{equation}
+|\theta-\theta_c|
+=
+O(m^{-1/3}),
+\end{equation}
+
+as described in Eq.~(1.12) of \cite{ding2020high}. At this scale, the
+corresponding eigenvalue displacement is of order $m^{-2/3}$, comparable
+to the natural edge fluctuation; see Eqs.~(1.13)--(1.14) and
+Theorem~3.4 of \cite{ding2020high}.
+
+The singular-vector scale can be obtained from the overlap formula in
+\cite{ding2020high}. For the right singular vector, Eq.~(2.12) defines
+
+\begin{equation}
+a_2(d)
+=
+\frac{d^4-c^{-1}}
+{d^2(d^2+1)},
+\end{equation}
+
+where the critical signal strength in the notation of
+\cite{ding2020high} is $d_c=c^{-1/4}$. Theorem~3.5 and Eq.~(1.17)
+show that, on the supercritical side, the empirical squared overlap is
+controlled by this deterministic quantity.
+
+Since
+
+\begin{equation}
+a_2(d_c)=0
+\end{equation}
+
+and the numerator satisfies
+
+\begin{equation}
+d^4-d_c^4
+=
+4d_c^3(d-d_c)
++
+O((d-d_c)^2),
+\end{equation}
+
+while the denominator remains non-zero at $d_c$, we have
+
+\begin{equation}
+a_2(d)
+=
+O(d-d_c)
+\end{equation}
+
+near the transition. Therefore, when
+
+\begin{equation}
+d-d_c
+=
+O(m^{-1/3}),
+\end{equation}
+
+the characteristic squared-overlap scale is
+
+\begin{equation}
+\tau_m^2
+=
+O_p(m^{-1/3}),
+\end{equation}
+
+consistent with the local singular-vector estimates in
+Theorem~3.5 of \cite{ding2020high}. On the subcritical side of the
+same window, the non-outlier estimate is no larger than this scale
+\cite{ding2020high}. Hence,
+
+\begin{equation}
+\tau_m
+=
+O_p(m^{-1/6}).
+\label{eq:tau_critical_app}
+\end{equation}
+
+Here we suppress the arbitrarily small polynomial slack appearing in the
+general high-probability bounds of \cite{ding2020high}.
+
+For the Bellman analysis in Theorem~\ref{thm:main_bellman}, we consider a
+non-degenerate critical regime in which the overlap actually attains this
+characteristic scale,
+
+\begin{equation}
+\tau_m
+=
+\Theta_p(m^{-1/6}).
+\label{eq:tau_critical_nondegenerate}
+\end{equation}
+
+This last relation is an additional non-degeneracy condition used in our
+Bellman-loss analysis; it is stronger than the upper-scale result required
+for Corollary~\ref{cor:three_regimes}.
+
+
+\paragraph{Supercritical regime.}
+
+For
+
+\begin{equation}
+\theta
+\geq
+\theta_c+\varepsilon,
+\end{equation}
+
+the empirical leading singular vector develops a non-zero asymptotic
+projection onto the population signal direction. This singular-vector
+phase transition is established in Theorems~2.9--2.10 of
+\cite{benaych2012singular}.
+
+For the rectangular signal-plus-noise model, Eq.~(1.17),
+Eq.~(2.12), and Theorem~3.5 of \cite{ding2020high} give the
+corresponding deterministic overlap. For a signal separated from the
+threshold by a fixed positive amount, this overlap is strictly positive.
+Consequently,
+
+\begin{equation}
+\tau_m
+\xrightarrow{p}
+\tau_\infty(\theta)>0.
+\label{eq:tau_super_app}
+\end{equation}
+
+Combining
+\eqref{eq:edge_fluctuation_app},
+\eqref{eq:outlier_fluctuation_app},
+\eqref{eq:tau_sub_app},
+\eqref{eq:tau_critical_app}, and
+\eqref{eq:tau_super_app}
+gives the three regimes stated in
+Corollary~\ref{cor:three_regimes}.
+
+
+
+
+% ============================================================
+% APPENDIX B
+% ============================================================
+
+\section{Bellman-Loss Analysis of the SSAR Update}
+\label{app:bellman_theory}
+
+We now prove Theorem~\ref{thm:main_bellman}. The spectral scales used below
+are those established in Corollary~\ref{cor:three_regimes} and justified in
+Appendix~\ref{app:corollary_proof}. The remaining arguments are derived
+directly from the critic model and the assumptions stated below.
+
+
+% ------------------------------------------------------------
+\subsection{Setup and Assumptions}
+% ------------------------------------------------------------
+
+Consider the critic representation
+\begin{equation}
+Q_W(h)
+=
+o^\top \varphi(Wh),
+\end{equation}
+where
+\begin{equation}
+W\in\mathbb{R}^{n\times m},
+\qquad
+h\in\mathbb{R}^{m},
+\qquad
+o\in\mathbb{R}^{n}.
+\end{equation}
+
+The target $y$ is treated as fixed during the critic update, and we write
+\begin{equation}
+r(h)
+=
+Q_W(h)-y.
+\end{equation}
+The corresponding Bellman loss is
+\begin{equation}
+L_0(W)
+=
+\frac{1}{2}
+\mathbb{E}[r(h)^2].
+\end{equation}
+
+Let $(s,u,v)$ denote the singular triplet of the active mode,
+\begin{equation}
+Wv=su,
+\qquad
+W^\top u=sv,
+\qquad
+\|u\|_2=\|v\|_2=1.
+\end{equation}
+
+The analysis uses the following local assumptions.
+
+\begin{assumption}[Spiked spectral model]
+\label{ass:spiked}
+The normalized weight matrix admits the local rank-one representation
+\begin{equation}
+\frac{W}{\sqrt m}
+=
+Z+\theta u^\star {v^\star}^{\top},
+\end{equation}
+where $u^\star$ and $v^\star$ are unit population signal directions.
+The aspect ratio satisfies
+\begin{equation}
+\frac{n}{m}\rightarrow c\in(0,\infty).
+\end{equation}
+\end{assumption}
+
+Assumption~\ref{ass:spiked} is the same spiked model used in
+Corollary~\ref{cor:three_regimes}. The corresponding spectral behavior is
+supported by the rectangular finite-rank perturbation results reviewed in
+Appendix~\ref{app:corollary_proof}.
+
+\begin{assumption}[Input geometry]
+\label{ass:features}
+There exist constants $C_h,\sigma_h<\infty$, independent of $m$, such that
+\begin{equation}
+\|h\|_2\leq C_h
+\end{equation}
+almost surely, and for every unit vector $a$ orthogonal to $v^\star$,
+\begin{equation}
+\mathbb{E}
+\left[
+(a^\top h)^2\mid W
+\right]
+\leq
+\frac{\sigma_h^2}{m}.
+\label{eq:orthogonal_energy}
+\end{equation}
+\end{assumption}
+
+The second condition states that the feature energy in an individual
+task-orthogonal direction is of the usual high-dimensional order $m^{-1}$.
+
+\begin{assumption}[Local critic regularity]
+\label{ass:regularity}
+There exist constants $C_o,C_r,L_1,L_2<\infty$, independent of $m$, such that
+\begin{equation}
+\|o\|_2\leq C_o,
+\qquad
+|r(h)|\leq C_r,
+\end{equation}
+and
+\begin{equation}
+|\varphi'(x)|\leq L_1,
+\qquad
+|\varphi''(x)|\leq L_2.
+\end{equation}
+The active singular value $s$ is simple.
+\end{assumption}
+
+\begin{assumption}[Task-relevant signal direction]
+\label{ass:task}
+There exists a constant $c_0>0$, independent of $m$, such that
+\begin{equation}
+-
+\mathbb{E}
+\left[
+r(h)
+\left(
+o^\top
+\operatorname{Diag}(\varphi'(Wh))u
+\right)
+(v^{\star\top}h)
+\right]
+\geq
+c_0.
+\label{eq:task_relevance}
+\end{equation}
+\end{assumption}
+
+Assumption~\ref{ass:task} states that moving the right singular direction
+toward the population signal direction is locally useful for the Bellman
+objective. It is the only assumption used to determine the sign of the
+task-aligned contribution.
+
+
+% ------------------------------------------------------------
+\subsection{The SSAR Update Direction}
+% ------------------------------------------------------------
+
+We first verify the singular-value derivative used by SSAR.
+
+\begin{lemma}[Derivative of a simple singular value]
+\label{lem:singular_derivative}
+Let $s$ be a simple singular value of $W$ with left and right singular vectors
+$u$ and $v$. For an arbitrary perturbation $H$,
+\begin{equation}
+\left.
+\frac{d}{d\epsilon}
+s(W+\epsilon H)
+\right|_{\epsilon=0}
+=
+u^\top Hv.
+\end{equation}
+Consequently,
+\begin{equation}
+\nabla_Ws
+=
+uv^\top.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Differentiate
+\begin{equation}
+Wv=su
+\end{equation}
+in the direction $H$. At $\epsilon=0$,
+\begin{equation}
+Hv+W\dot v
+=
+\dot s\,u+s\dot u.
+\end{equation}
+Multiplying by $u^\top$ gives
+\begin{equation}
+u^\top Hv
++
+u^\top W\dot v
+=
+\dot s
++
+s\,u^\top\dot u.
+\end{equation}
+
+Since $W^\top u=sv$,
+\begin{equation}
+u^\top W\dot v
+=
+s\,v^\top\dot v.
+\end{equation}
+The normalizations $\|u\|_2=\|v\|_2=1$ imply
+\begin{equation}
+u^\top\dot u=0,
+\qquad
+v^\top\dot v=0.
+\end{equation}
+Hence
+\begin{equation}
+\dot s=u^\top Hv.
+\end{equation}
+
+Using the Frobenius inner product,
+\begin{equation}
+u^\top Hv
+=
+\langle uv^\top,H\rangle_{\mathrm F},
+\end{equation}
+which gives
+\begin{equation}
+\nabla_Ws=uv^\top.
+\end{equation}
+\end{proof}
+
+For one active mode,
+\begin{equation}
+L_{\mathrm{spike}}
+=
+\left(
+\lambda_+ + T-\frac{s^2}{m}
+\right)_+.
+\end{equation}
+
+Inside the active region, Lemma~\ref{lem:singular_derivative} gives
+\begin{equation}
+\nabla_WL_{\mathrm{spike}}
+=
+-\frac{2s}{m}uv^\top.
+\label{eq:spike_gradient_app}
+\end{equation}
+
+Therefore, one gradient step on
+\begin{equation}
+L_{\mathrm{tot}}
+=
+L_0+\gamma L_{\mathrm{spike}}
+\end{equation}
+contains the additional SSAR displacement
+\begin{equation}
+\Delta W_{\mathrm{SSAR}}
+=
+\alpha_muv^\top,
+\label{eq:ssar_displacement_app}
+\end{equation}
+where
+\begin{equation}
+\alpha_m
+=
+\frac{2\eta\gamma s}{m}.
+\label{eq:alpha_app}
+\end{equation}
+
+For an active near-edge mode,
+\begin{equation}
+\frac{s^2}{m}
+\in
+[\lambda_+,\lambda_++T],
+\qquad
+T=cm^{-2/3}.
+\end{equation}
+
+Since the MP edge $\lambda_+$ is a positive constant in the asymptotic
+regime considered here,
+\begin{equation}
+\frac{s^2}{m}
+=
+\Theta(1),
+\end{equation}
+and therefore
+\begin{equation}
+s=\Theta(\sqrt m).
+\end{equation}
+
+When $\eta$ and $\gamma$ do not scale with $m$,
+\begin{equation}
+\alpha_m
+=
+\Theta(m^{-1/2}).
+\label{eq:alpha_order_app}
+\end{equation}
+
+
+% ------------------------------------------------------------
+\subsection{Directional Bellman Gain}
+% ------------------------------------------------------------
+
+Choose the sign of $v$ such that
+\begin{equation}
+v^\top v^\star
+=
+\tau_m
+\geq0.
+\end{equation}
+
+Then
+\begin{equation}
+v
+=
+\tau_m v^\star
++
+\sqrt{1-\tau_m^2}\,v_\perp,
+\label{eq:v_decomposition}
+\end{equation}
+where
+\begin{equation}
+v_\perp^\top v^\star=0,
+\qquad
+\|v_\perp\|_2=1.
+\end{equation}
+
+Define
+\begin{equation}
+S(h)
+=
+o^\top
+\operatorname{Diag}(\varphi'(Wh))u.
+\label{eq:S_definition}
+\end{equation}
+
+\begin{lemma}[Directional derivative of the critic]
+\label{lem:critic_direction}
+For the direction $uv^\top$,
+\begin{equation}
+\left.
+\frac{d}{d\alpha}
+Q_{W+\alpha uv^\top}(h)
+\right|_{\alpha=0}
+=
+S(h)v^\top h.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Since
+\begin{equation}
+(W+\alpha uv^\top)h
+=
+Wh+\alpha u(v^\top h),
+\end{equation}
+the chain rule gives
+\begin{align}
+\left.
+\frac{d}{d\alpha}
+Q_{W+\alpha uv^\top}(h)
+\right|_{\alpha=0}
+&=
+o^\top
+\operatorname{Diag}(\varphi'(Wh))
+u(v^\top h)
+\\
+&=
+S(h)v^\top h.
+\end{align}
+\end{proof}
+
+We define the Bellman gain along the spectral direction as
+\begin{equation}
+G_m
+=
+-
+\left\langle
+\nabla_WL_0(W),
+uv^\top
+\right\rangle_{\mathrm F}.
+\label{eq:G_definition}
+\end{equation}
+
+Using Lemma~\ref{lem:critic_direction},
+\begin{equation}
+G_m
+=
+-
+\mathbb{E}
+\left[
+r(h)S(h)v^\top h
+\right].
+\end{equation}
+
+Substituting \eqref{eq:v_decomposition} yields
+\begin{equation}
+G_m
+=
+\tau_mA_m+R_m,
+\label{eq:G_decomposition}
+\end{equation}
+where
+\begin{equation}
+A_m
+=
+-
+\mathbb{E}
+\left[
+r(h)S(h)(v^{\star\top}h)
+\right]
+\label{eq:A_definition}
+\end{equation}
+and
+\begin{equation}
+R_m
+=
+-
+\sqrt{1-\tau_m^2}
+\mathbb{E}
+\left[
+r(h)S(h)(v_\perp^\top h)
+\right].
+\label{eq:R_definition}
+\end{equation}
+
+Assumption~\ref{ass:task} gives
+\begin{equation}
+A_m\geq c_0.
+\end{equation}
+
+On the other hand,
+\begin{equation}
+|S(h)|
+\leq
+\|o\|_2
+\left\|
+\operatorname{Diag}(\varphi'(Wh))
+\right\|_{\mathrm{op}}
+\|u\|_2
+\leq
+C_oL_1.
+\end{equation}
+
+Together with $\|h\|_2\leq C_h$,
+\begin{align}
+|A_m|
+&\leq
+\mathbb{E}
+\left[
+|r(h)S(h)(v^{\star\top}h)|
+\right]
+\\
+&\leq
+C_rC_oL_1C_h.
+\end{align}
+
+Hence
+\begin{equation}
+A_m=\Theta(1).
+\label{eq:A_order}
+\end{equation}
+
+
+% ------------------------------------------------------------
+\subsection{Task-Orthogonal Contribution}
+% ------------------------------------------------------------
+
+\begin{lemma}[Task-orthogonal contribution]
+\label{lem:R_order}
+Under Assumptions~\ref{ass:features} and~\ref{ass:regularity},
+\begin{equation}
+R_m
+=
+O_p(m^{-1/2}).
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+From \eqref{eq:R_definition},
+\begin{align}
+|R_m|
+&\leq
+\mathbb{E}
+\left[
+|r(h)S(h)(v_\perp^\top h)|
+\mid W
+\right].
+\end{align}
+
+Applying Cauchy--Schwarz,
+\begin{align}
+|R_m|
+&\leq
+\left(
+\mathbb{E}
+[
+r(h)^2S(h)^2
+\mid W
+]
+\right)^{1/2}
+\left(
+\mathbb{E}
+[
+(v_\perp^\top h)^2
+\mid W
+]
+\right)^{1/2}.
+\end{align}
+
+By Assumption~\ref{ass:regularity},
+\begin{equation}
+|r(h)S(h)|
+\leq
+C_rC_oL_1.
+\end{equation}
+
+Since $v_\perp$ is a unit vector orthogonal to $v^\star$,
+Assumption~\ref{ass:features} gives
+\begin{equation}
+\mathbb{E}
+[
+(v_\perp^\top h)^2
+\mid W
+]
+\leq
+\frac{\sigma_h^2}{m}.
+\end{equation}
+
+Therefore
+\begin{equation}
+|R_m|
+\leq
+\frac{C_rC_oL_1\sigma_h}{\sqrt m},
+\end{equation}
+which proves
+\begin{equation}
+R_m
+=
+O_p(m^{-1/2}).
+\end{equation}
+\end{proof}
+
+
+% ------------------------------------------------------------
+\subsection{Local Change of the Bellman Loss}
+% ------------------------------------------------------------
+
+We next control the finite SSAR step rather than only its directional
+derivative.
+
+\begin{lemma}[Local Bellman expansion]
+\label{lem:bellman_expansion}
+There exist constants $\alpha_0>0$ and $L_B<\infty$, independent of $m$,
+such that for $|\alpha|\leq\alpha_0$,
+\begin{equation}
+L_0(W+\alpha uv^\top)-L_0(W)
+=
+-\alpha G_m+\xi_m(\alpha),
+\label{eq:bellman_expansion}
+\end{equation}
+where
+\begin{equation}
+|\xi_m(\alpha)|
+\leq
+\frac{L_B}{2}\alpha^2.
+\label{eq:remainder_bound}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Let
+\begin{equation}
+b(\alpha)
+=
+L_0(W+\alpha uv^\top),
+\end{equation}
+and define
+\begin{equation}
+q_\alpha(h)
+=
+Q_{W+\alpha uv^\top}(h).
+\end{equation}
+
+From Lemma~\ref{lem:critic_direction},
+\begin{equation}
+b'(0)=-G_m.
+\end{equation}
+
+For general $\alpha$,
+\begin{equation}
+q_\alpha'(h)
+=
+(v^\top h)\,
+o^\top
+\operatorname{Diag}
+\left(
+\varphi'((W+\alpha uv^\top)h)
+\right)
+u.
+\end{equation}
+
+Using Assumptions~\ref{ass:features} and~\ref{ass:regularity},
+\begin{equation}
+|q_\alpha'(h)|
+\leq
+C_oL_1C_h.
+\label{eq:q_first_bound}
+\end{equation}
+
+Differentiating once more,
+\begin{equation}
+q_\alpha''(h)
+=
+(v^\top h)^2
+\sum_{j=1}^{n}
+o_ju_j^2
+\varphi''
+\left(
+((W+\alpha uv^\top)h)_j
+\right).
+\end{equation}
+
+Since
+\begin{equation}
+\sum_{j=1}^{n}|o_j|u_j^2
+\leq
+\|o\|_2
+\left(
+\sum_{j=1}^{n}u_j^4
+\right)^{1/2}
+\leq
+C_o,
+\end{equation}
+we obtain
+\begin{equation}
+|q_\alpha''(h)|
+\leq
+C_oL_2C_h^2.
+\label{eq:q_second_bound}
+\end{equation}
+
+Furthermore, by \eqref{eq:q_first_bound},
+\begin{equation}
+|q_\alpha(h)-q_0(h)|
+\leq
+|\alpha|C_oL_1C_h.
+\end{equation}
+
+Thus, for $|\alpha|\leq\alpha_0$,
+\begin{equation}
+|q_\alpha(h)-y|
+\leq
+C_r+\alpha_0C_oL_1C_h.
+\end{equation}
+
+Differentiating the Bellman loss twice gives
+\begin{equation}
+b''(\alpha)
+=
+\mathbb{E}
+\left[
+(q_\alpha'(h))^2
++
+(q_\alpha(h)-y)q_\alpha''(h)
+\right].
+\end{equation}
+
+Equations~\eqref{eq:q_first_bound} and~\eqref{eq:q_second_bound} imply that
+there exists a constant $L_B$, independent of $m$, such that
+\begin{equation}
+|b''(\alpha)|
+\leq
+L_B
+\end{equation}
+throughout this neighborhood.
+
+Taylor's theorem around $\alpha=0$ therefore gives
+\begin{equation}
+b(\alpha)
+=
+b(0)
++
+\alpha b'(0)
++
+\xi_m(\alpha),
+\end{equation}
+with
+\begin{equation}
+|\xi_m(\alpha)|
+\leq
+\frac{L_B}{2}\alpha^2.
+\end{equation}
+
+Using $b'(0)=-G_m$ proves the result.
+\end{proof}
+
+
+% ------------------------------------------------------------
+\subsection{Task-Aligned and Remainder Terms}
+% ------------------------------------------------------------
+
+Set $\alpha=\alpha_m$ in
+Lemma~\ref{lem:bellman_expansion}. From
+\eqref{eq:G_decomposition},
+\begin{align}
+\Delta L_{\mathrm{SSAR}}
+&=
+-\alpha_m
+\left(
+\tau_mA_m+R_m
+\right)
++
+\xi_m(\alpha_m)
+\\
+&=
+-\alpha_m\tau_mA_m
++
+\left[
+-\alpha_mR_m+\xi_m(\alpha_m)
+\right].
+\end{align}
+
+We therefore define
+\begin{equation}
+\mathcal D_m
+=
+\alpha_m\tau_mA_m
+\label{eq:D_definition}
+\end{equation}
+and
+\begin{equation}
+\mathcal E_m
+=
+-\alpha_mR_m+\xi_m(\alpha_m).
+\label{eq:E_definition}
+\end{equation}
+
+Then
+\begin{equation}
+\Delta L_{\mathrm{SSAR}}
+=
+-\mathcal D_m+\mathcal E_m.
+\label{eq:DE_decomposition}
+\end{equation}
+
+Since
+\begin{equation}
+\alpha_m>0,
+\qquad
+\tau_m\geq0,
+\qquad
+A_m\geq c_0,
+\end{equation}
+we have
+\begin{equation}
+\mathcal D_m\geq0.
+\end{equation}
+
+The remainder $\mathcal E_m$ has no prescribed sign.
+
+Using
+\begin{equation}
+\alpha_m=\Theta(m^{-1/2}),
+\qquad
+R_m=O_p(m^{-1/2}),
+\end{equation}
+we have
+\begin{equation}
+\alpha_mR_m
+=
+O_p(m^{-1}).
+\end{equation}
+
+The Taylor remainder satisfies
+\begin{equation}
+|\xi_m(\alpha_m)|
+\leq
+\frac{L_B}{2}\alpha_m^2
+=
+O(m^{-1}).
+\end{equation}
+
+Therefore
+\begin{equation}
+\mathcal E_m
+=
+O_p(m^{-1}).
+\label{eq:E_order}
+\end{equation}
+
+
+% ------------------------------------------------------------
+\subsection{A Useful Order Comparison}
+% ------------------------------------------------------------
+
+The following elementary fact will be used in the critical and
+supercritical cases.
+
+\begin{lemma}
+\label{lem:order_ratio}
+Let $X_m=O_p(a_m)$ and let $Y_m=\Theta_p(b_m)$ with $Y_m>0$. If
+\begin{equation}
+\frac{a_m}{b_m}\rightarrow0,
+\end{equation}
+then
+\begin{equation}
+\frac{X_m}{Y_m}
+\xrightarrow{p}
+0.
+\end{equation}
+Equivalently,
+\begin{equation}
+X_m=o_p(Y_m).
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Since $X_m=O_p(a_m)$,
+\begin{equation}
+\frac{X_m}{a_m}
+=
+O_p(1).
+\end{equation}
+
+Since $Y_m=\Theta_p(b_m)$ and $Y_m>0$,
+\begin{equation}
+\frac{b_m}{Y_m}
+=
+O_p(1).
+\end{equation}
+
+Therefore
+\begin{equation}
+\frac{X_m}{Y_m}
+=
+\frac{X_m}{a_m}
+\frac{a_m}{b_m}
+\frac{b_m}{Y_m}.
+\end{equation}
+
+The first and third factors are bounded in probability, while the middle
+factor converges deterministically to zero. Hence
+\begin{equation}
+\frac{X_m}{Y_m}
+\xrightarrow{p}
+0.
+\end{equation}
+\end{proof}
+
+
+% ------------------------------------------------------------
+\subsection{Proof of Theorem~\ref{thm:main_bellman}}
+% ------------------------------------------------------------
+
+\begin{proof}[Proof of Theorem~\ref{thm:main_bellman}]
+
+We apply the decomposition
+\begin{equation}
+\Delta L_{\mathrm{SSAR}}
+=
+-\mathcal D_m+\mathcal E_m
+\end{equation}
+to the three regimes in Corollary~\ref{cor:three_regimes}.
+
+
+\paragraph{Subcritical regime.}
+
+Appendix~\ref{app:corollary_proof} gives
+\begin{equation}
+\tau_m
+=
+O_p(m^{-1/2})
+\end{equation}
+for a signal that remains a fixed distance below the BBP threshold.
+
+Together with
+\begin{equation}
+\alpha_m=\Theta(m^{-1/2})
+\end{equation}
+and
+\begin{equation}
+A_m=\Theta(1),
+\end{equation}
+this gives
+\begin{equation}
+\mathcal D_m
+=
+\alpha_m\tau_mA_m
+=
+O_p(m^{-1}).
+\end{equation}
+
+Equation~\eqref{eq:E_order} gives
+\begin{equation}
+\mathcal E_m
+=
+O_p(m^{-1}).
+\end{equation}
+
+Thus neither contribution is asymptotically dominant. Since
+$\mathcal E_m$ has no prescribed sign, the stated assumptions do not
+determine the sign of
+\begin{equation}
+\Delta L_{\mathrm{SSAR}}
+=
+-\mathcal D_m+\mathcal E_m.
+\end{equation}
+
+This proves the subcritical statement.
+
+
+\paragraph{BBP transition regime.}
+
+For the non-degenerate critical regime used in the theorem,
+\begin{equation}
+\tau_m
+=
+\Theta_p(m^{-1/6}).
+\end{equation}
+
+As noted in Appendix~\ref{app:corollary_proof}, the $m^{-1/6}$ scale is the
+characteristic critical overlap scale obtained from the rectangular
+singular-vector results of \cite{ding2020high}; the lower-order
+non-degeneracy required for $\Theta_p$ rather than $O_p$ is an explicit
+condition of Theorem~\ref{thm:main_bellman}.
+
+Using
+\begin{equation}
+\alpha_m=\Theta(m^{-1/2})
+\end{equation}
+and
+\begin{equation}
+A_m=\Theta(1),
+\end{equation}
+we obtain
+\begin{equation}
+\mathcal D_m
+=
+\Theta_p(m^{-2/3}).
+\end{equation}
+
+The remainder satisfies
+\begin{equation}
+\mathcal E_m
+=
+O_p(m^{-1}).
+\end{equation}
+
+Since
+\begin{equation}
+\frac{m^{-1}}{m^{-2/3}}
+=
+m^{-1/3}
+\rightarrow0,
+\end{equation}
+Lemma~\ref{lem:order_ratio} gives
+\begin{equation}
+\mathcal E_m
+=
+o_p(\mathcal D_m).
+\end{equation}
+
+Hence
+\begin{equation}
+\frac{\mathcal E_m}{\mathcal D_m}
+\xrightarrow{p}
+0.
+\end{equation}
+
+Because $\mathcal D_m>0$ with probability tending to one,
+\begin{align}
+\Delta L_{\mathrm{SSAR}}
+&=
+-\mathcal D_m+\mathcal E_m
+\\
+&=
+-\mathcal D_m
+\left(
+1-\frac{\mathcal E_m}{\mathcal D_m}
+\right)
+<
+0
+\end{align}
+with probability tending to one.
+
+This proves the critical-regime statement.
+
+
+\paragraph{Supercritical regime.}
+
+For a fixed supercritical signal,
+Corollary~\ref{cor:three_regimes} gives
+\begin{equation}
+\tau_m
+\xrightarrow{p}
+\tau_\infty(\theta)>0.
+\end{equation}
+
+The origin of this non-vanishing overlap is the rectangular singular-vector
+phase transition established in
+\cite{benaych2012singular,ding2020high}, as discussed in
+Appendix~\ref{app:corollary_proof}. Hence
+\begin{equation}
+\tau_m
+=
+\Theta_p(1).
+\end{equation}
+
+It follows that
+\begin{equation}
+\mathcal D_m
+=
+\alpha_m\tau_mA_m
+=
+\Theta_p(m^{-1/2}).
+\end{equation}
+
+Again,
+\begin{equation}
+\mathcal E_m
+=
+O_p(m^{-1}).
+\end{equation}
+
+Since
+\begin{equation}
+\frac{m^{-1}}{m^{-1/2}}
+=
+m^{-1/2}
+\rightarrow0,
+\end{equation}
+Lemma~\ref{lem:order_ratio} gives
+\begin{equation}
+\mathcal E_m
+=
+o_p(\mathcal D_m).
+\end{equation}
+
+Therefore
+\begin{equation}
+\Delta L_{\mathrm{SSAR}}
+=
+-\mathcal D_m+\mathcal E_m
+<
+0
+\end{equation}
+with probability tending to one.
+
+This completes the proof.
+\end{proof}
+
+
+% ------------------------------------------------------------
+\subsection{Relation to the Edge Window and Stopping Rule}
+% ------------------------------------------------------------
+
+The result also clarifies the role of the spectral window used by SSAR.
+Both a far-subcritical mode and a mode near the BBP transition may satisfy
+\begin{equation}
+\lambda_1
+=
+\lambda_+
++
+O_p(m^{-2/3}),
+\end{equation}
+as established in Appendix~\ref{app:corollary_proof}. Consequently, the
+leading eigenvalue alone does not distinguish the two regimes within the
+window
+\begin{equation}
+I
+=
+[\lambda_+,\lambda_++cm^{-2/3}].
+\end{equation}
+
+Their Bellman effects are nevertheless different. In the subcritical
+regime,
+\begin{equation}
+\mathcal D_m=O_p(m^{-1}),
+\qquad
+\mathcal E_m=O_p(m^{-1}),
+\end{equation}
+so no sign is guaranteed. In the non-degenerate transition regime,
+\begin{equation}
+\mathcal D_m=\Theta_p(m^{-2/3}),
+\qquad
+\mathcal E_m=O_p(m^{-1})
+=
+o_p(\mathcal D_m),
+\end{equation}
+and the task-aligned descent term dominates.
+
+Once a mode becomes clearly separated from the spectral bulk, it no longer
+belongs to the near-edge window and the stopping rule removes the additional
+spectral acceleration. The supercritical part of
+Theorem~\ref{thm:main_bellman} describes the Bellman geometry of the same
+spectral direction after separation; it does not require SSAR to continue
+accelerating a mode that has already satisfied the stopping criterion.
+
+
+
+
+
+\end{document}
